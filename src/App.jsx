@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 
-const API = "http://127.0.0.1:8000";
+const API_BASE = "https://fitnessforge-api-2026.onrender.com";
 const fallbackPlan = { goal:"General Fitness", level:"Beginner", fitness_score:65, workout_type:"General Fitness", intensity:"Low to Moderate", duration:"25 minutes", workout:["Bodyweight Squats","Push Ups","Plank","Stretching"] };
 const navItems = [["dashboard","⌂","Dashboard"],["workouts","◈","Workouts"],["nutrition","◉","Nutrition"],["progress","↗","Progress"],["profile","♙","Profile"]];
 
