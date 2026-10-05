@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./supabaseClient";
 import "./App.css";
 
 const API_BASE = "https://fitnessforge-api-2026.onrender.com";
@@ -7,37 +8,140 @@ const navItems = [["dashboard","⌂","Dashboard"],["workouts","◈","Workouts"],
 
 function App(){
  const [darkMode,setDarkMode]=useState(true),[activePage,setActivePage]=useState("dashboard"),[showAssessment,setShowAssessment]=useState(false),[showProfile,setShowProfile]=useState(false);
+ const [authUser,setAuthUser]=useState(null),[showAuth,setShowAuth]=useState(false);
  const [goal,setGoal]=useState(localStorage.getItem("ff_goal")||"General Fitness"),[level,setLevel]=useState(localStorage.getItem("ff_level")||"Beginner");
  const [plan,setPlan]=useState(()=>{try{return {...fallbackPlan,...JSON.parse(localStorage.getItem("ff_plan")||"{}")}}catch{return fallbackPlan}});
  const [profile,setProfile]=useState(()=>{try{return {name:"Fitness Explorer",age:"",height:"",weight:"",gender:"Prefer not to say",activity:"Moderately Active",...JSON.parse(localStorage.getItem("ff_profile")||"{}")}}catch{return {name:"Fitness Explorer",age:"",height:"",weight:"",gender:"Prefer not to say",activity:"Moderately Active"}}});
  const [completed,setCompleted]=useState(()=>{try{return JSON.parse(localStorage.getItem("ff_completed")||"[]")}catch{return []}});
  const [loading,setLoading]=useState(false),[apiOnline,setApiOnline]=useState(false),[toast,setToast]=useState("");
- useEffect(()=>{fetch(`${API}/health`).then(r=>r.ok?r.json():Promise.reject()).then(()=>setApiOnline(true)).catch(()=>setApiOnline(false))},[]);
+ const [chatOpen,setChatOpen]=useState(false);
+ const [chatInput,setChatInput]=useState("");
+ const [chatMessages,setChatMessages]=useState([{role:"assistant",text:"Hi! I'm your Fitness Forge AI assistant. Ask me about fitness, workouts, nutrition, or anything else!"}]);
+ const [chatLoading,setChatLoading]=useState(false);
+ useEffect(()=>{fetch(`${API_BASE}/health`).then(r=>r.ok?r.json():Promise.reject()).then(()=>setApiOnline(true)).catch(()=>setApiOnline(false))},[]);
+ useEffect(()=>{
+  let active=true;
+  supabase.auth.getSession().then(({data})=>{
+   if(active && data.session?.user){setAuthUser(data.session.user);loadUserProfile(data.session.user)}
+  });
+  const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,session)=>{
+   if(active)setAuthUser(session?.user||null);
+  });
+  return ()=>{active=false;subscription.unsubscribe()};
+ },[]);
+ async function loadUserProfile(user){
+  const {data,error}=await supabase.from("profiles").select("*").eq("user_id",user.id).maybeSingle();
+  let row=data;
+  if(!row && !error){
+   const m=user.user_metadata||{};
+   const h=Number(m.height_cm)||0,w=Number(m.weight_kg)||0;
+   const payload={user_id:user.id,full_name:m.full_name||user.email?.split("@")[0]||"Fitness Explorer",age:m.age?Number(m.age):null,mobile_number:m.mobile_number||null,height_cm:h||null,weight_kg:w||null,bmi:h&&w?Number((w/((h/100)**2)).toFixed(1)):null,body_fat_percentage:m.body_fat_percentage?Number(m.body_fat_percentage):null,activity_level:m.activity_level||"Moderately Active",health_conditions:m.health_conditions||null};
+   const result=await supabase.from("profiles").upsert(payload).select().maybeSingle();
+   row=result.data||payload;
+  }
+  if(row){setProfile(prev=>({...prev,name:row.full_name||prev.name,age:row.age??prev.age,height:row.height_cm??prev.height,weight:row.weight_kg??prev.weight,activity:row.activity_level||prev.activity,mobile:row.mobile_number||"",bodyFat:row.body_fat_percentage??"",healthConditions:row.health_conditions||""}));}
+ }
+ async function handleAuthSuccess(user){setAuthUser(user);await loadUserProfile(user);setShowAuth(false);setToast("✓ Signed in successfully")}
+ async function handleLogout(){await supabase.auth.signOut();setAuthUser(null);setShowAuth(false);setToast("Signed out")}
  useEffect(()=>{localStorage.setItem("ff_goal",goal);localStorage.setItem("ff_level",level);localStorage.setItem("ff_plan",JSON.stringify(plan));localStorage.setItem("ff_profile",JSON.stringify(profile));localStorage.setItem("ff_completed",JSON.stringify(completed))},[goal,level,plan,profile,completed]);
  useEffect(()=>{if(!toast)return;const t=setTimeout(()=>setToast(""),2500);return()=>clearTimeout(t)},[toast]);
  const exercises=plan.workout||[], completion=exercises.length?Math.round(completed.filter(x=>exercises.includes(x)).length/exercises.length*100):0;
  const calories=useMemo(()=>{let w=+profile.weight,h=+profile.height,a=+profile.age;if(!w||!h||!a)return 2000;let b=10*w+6.25*h-5*a+5;let m=profile.activity==="Lightly Active"?1.375:profile.activity==="Very Active"?1.725:1.55;return Math.round(b*m)},[profile]);
- async function generatePlan(){setLoading(true);try{const r=await fetch(`${API}/assessment`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal,level})});if(!r.ok)throw Error();const d=await r.json();setPlan(d);setCompleted([]);setActivePage("dashboard");setShowAssessment(false);setToast("✓ Personalized plan generated") }catch{setPlan({...fallbackPlan,goal,level});setCompleted([]);setActivePage("dashboard");setShowAssessment(false);setToast("Starter plan loaded — backend unavailable")}finally{setLoading(false)}}
+ async function generatePlan(){setLoading(true);try{const r=await fetch(`${API_BASE}/assessment`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({goal,level})});if(!r.ok)throw Error();const d=await r.json();setPlan(d);setCompleted([]);setActivePage("dashboard");setShowAssessment(false);setToast("✓ Personalized plan generated") }catch{setPlan({...fallbackPlan,goal,level});setCompleted([]);setActivePage("dashboard");setShowAssessment(false);setToast("Starter plan loaded — backend unavailable")}finally{setLoading(false)}}
+ async function sendChatMessage(){
+  const message=chatInput.trim();
+  if(!message||chatLoading)return;
+  setChatMessages(prev=>[...prev,{role:"user",text:message}]);
+  setChatInput("");
+  setChatLoading(true);
+  try{
+   const response=await fetch(`${API_BASE}/chat`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message})});
+   const data=await response.json();
+   if(!response.ok)throw new Error(data.detail||"Unable to get a reply.");
+   setChatMessages(prev=>[...prev,{role:"assistant",text:data.reply||"I couldn't generate a reply. Please try again."}]);
+  }catch(error){
+   setChatMessages(prev=>[...prev,{role:"assistant",text:`Sorry, I couldn't connect to the AI assistant. ${error.message}`}]);
+  }finally{setChatLoading(false)}
+ }
  function toggle(x){setCompleted(p=>p.includes(x)?p.filter(y=>y!==x):[...p,x])}
- function saveProfile(p){setProfile(p);setShowProfile(false);setToast("✓ Profile saved")}
+ async function persistProfile(p){
+  setProfile(p);localStorage.setItem("ff_profile",JSON.stringify(p));
+  if(!authUser){setToast("✓ Profile saved on this device. Log in to sync it to your account.");return}
+  const h=Number(p.height)||0,w=Number(p.weight)||0;
+  const payload={user_id:authUser.id,full_name:p.name||"Fitness Explorer",age:p.age?Number(p.age):null,mobile_number:p.mobile||null,height_cm:h||null,weight_kg:w||null,bmi:h&&w?Number((w/((h/100)**2)).toFixed(1)):null,body_fat_percentage:p.bodyFat?Number(p.bodyFat):null,activity_level:p.activity||"Moderately Active",health_conditions:p.healthConditions||null};
+  const {error}=await supabase.from("profiles").upsert(payload);
+  setToast(error?`Saved locally; account sync failed: ${error.message}`:"✓ Profile saved to your account");
+ }
+ function saveProfile(p){persistProfile(p);setShowProfile(false)}
  function nav(k){setActivePage(k);setShowProfile(false)}
  const first=(profile.name||"Fitness Explorer").split(" ")[0];
  return <div className={`app-shell ${darkMode?"theme-dark":"theme-light"}`}>
   <aside className="sidebar"><div className="brand"><div className="brand-orb"><span>FF</span></div><div><div className="brand-name">FITNESS FORGE</div><div className="brand-sub">TRAIN · TRACK · EVOLVE</div></div></div><div className="sidebar-label">WORKSPACE</div><nav className="nav-list">{navItems.map(([k,i,l])=><button key={k} className={`nav-item ${activePage===k?"active":""}`} onClick={()=>nav(k)}><span className="nav-icon">{i}</span><span>{l}</span>{k==="workouts"&&completion>0&&<em>{completion}%</em>}{activePage===k&&<i/>}</button>)}</nav><div className="sidebar-spacer"/><div className="forge-mini-card"><div className="mini-ring"><span>{plan.fitness_score}</span></div><div><b>Fitness Score</b><small>{goal}</small></div></div><div className="sidebar-user" onClick={()=>nav("profile")}><div className="user-avatar">{first[0]}</div><div><b>{profile.name}</b><small>Personal workspace</small></div></div><button className="theme-switch" onClick={()=>setDarkMode(v=>!v)}><span>{darkMode?"☀":"☾"}</span>{darkMode?"Light appearance":"Dark appearance"}</button></aside>
-  <main className="main"><header className="topbar"><div className="breadcrumbs"><span>FITNESS FORGE</span><b>/</b><strong>{activePage.toUpperCase()}</strong></div><div className="topbar-actions"><div className={`api-pill ${apiOnline?"online":""}`}><span/>{apiOnline?"ENGINE ONLINE":"OFFLINE DEMO"}</div><button className="round-button" onClick={()=>setDarkMode(v=>!v)}>◐</button><div className="top-avatar" onClick={()=>nav("profile")}>{first[0]}</div></div></header>
+  <main className="main"><header className="topbar"><div className="breadcrumbs"><span>FITNESS FORGE</span><b>/</b><strong>{activePage.toUpperCase()}</strong></div><div className="topbar-actions"><div className={`api-pill ${apiOnline?"online":""}`}><span/>{apiOnline?"ENGINE ONLINE":"OFFLINE DEMO"}</div><button className="round-button" onClick={()=>setDarkMode(v=>!v)}>◐</button><button className="ghost-button" onClick={()=>authUser?handleLogout():setShowAuth(true)}>{authUser?"Log out":"Login / Sign up"}</button><div className="top-avatar" onClick={()=>nav("profile")}>{first[0]}</div></div></header>
    {activePage==="dashboard"&&<Dashboard plan={plan} completion={completion} exercises={exercises} completed={completed} toggle={toggle} setShowAssessment={setShowAssessment} nav={nav} first={first}/>} 
    {activePage==="workouts"&&<Workouts plan={plan} completed={completed} toggle={toggle} setShowAssessment={setShowAssessment}/>} 
    {activePage==="nutrition"&&<Nutrition calories={calories} profile={profile} goal={goal} setShowProfile={setShowProfile}/>} 
    {activePage==="progress"&&<Progress plan={plan} completed={completed} completion={completion}/>} 
-   {activePage==="profile"&&<Profile profile={profile} setProfile={setProfile} goal={goal} setGoal={setGoal} level={level} setLevel={setLevel} save={()=>{localStorage.setItem("ff_profile",JSON.stringify(profile));setToast("✓ Profile saved")}}/>}
+   {activePage==="profile"&&<Profile profile={profile} setProfile={setProfile} goal={goal} setGoal={setGoal} level={level} setLevel={setLevel} save={()=>persistProfile(profile)}/>}
   </main>
   {showAssessment&&<Assessment goal={goal} setGoal={setGoal} level={level} setLevel={setLevel} loading={loading} close={()=>setShowAssessment(false)} generate={generatePlan}/>} 
-  {showProfile&&<ProfileModal profile={profile} save={saveProfile} close={()=>setShowProfile(false)}/>} 
+  {showProfile&&<ProfileModal profile={profile} save={saveProfile} close={()=>setShowProfile(false)}/>}
+  {showAuth&&<AuthModal close={()=>setShowAuth(false)} onSuccess={handleAuthSuccess}/>} 
+  {chatOpen&&<div style={{position:"fixed",right:24,bottom:90,width:"min(360px, calc(100vw - 32px))",height:460,maxHeight:"70vh",background:darkMode?"#171923":"#ffffff",color:darkMode?"#f5f5f7":"#20202a",border:"1px solid #77777744",borderRadius:18,boxShadow:"0 12px 40px #0004",zIndex:2000,display:"flex",flexDirection:"column",overflow:"hidden"}}>
+   <div style={{padding:16,background:"#7058e8",color:"white",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div><strong>Fitness Forge AI</strong><div style={{fontSize:12,marginTop:4}}>Your personal assistant</div></div><button onClick={()=>setChatOpen(false)} style={{background:"transparent",color:"white",border:0,fontSize:24,cursor:"pointer"}} aria-label="Close chatbot">×</button></div>
+   <div style={{flex:1,overflowY:"auto",padding:12,display:"flex",flexDirection:"column",gap:10}}>
+    {chatMessages.map((msg,index)=><div key={index} style={{alignSelf:msg.role==="user"?"flex-end":"flex-start",maxWidth:"85%",padding:"10px 12px",borderRadius:12,background:msg.role==="user"?"#7058e8":darkMode?"#292b38":"#f0f0f5",color:msg.role==="user"?"#ffffff":darkMode?"#f5f5f7":"#20202a",whiteSpace:"pre-wrap",overflowWrap:"anywhere",fontSize:14,lineHeight:1.5}}>{msg.text}</div>)}
+    {chatLoading&&<div style={{fontSize:13,opacity:0.7}}>AI is thinking...</div>}
+   </div>
+   <form onSubmit={event=>{event.preventDefault();sendChatMessage()}} style={{display:"flex",gap:8,padding:12,borderTop:"1px solid #77777733"}}>
+    <input value={chatInput} onChange={event=>setChatInput(event.target.value)} placeholder="Ask me anything..." maxLength={2000} disabled={chatLoading} style={{flex:1,minWidth:0,padding:11,borderRadius:10,border:"1px solid #77777755",background:darkMode?"#242633":"#ffffff",color:"inherit",outline:"none"}}/>
+    <button type="submit" disabled={chatLoading||!chatInput.trim()} style={{padding:"0 14px",borderRadius:10,border:0,background:"#7058e8",color:"white",cursor:"pointer",opacity:chatLoading||!chatInput.trim()?0.6:1}}>Send</button>
+   </form>
+  </div>}
+  <button onClick={()=>setChatOpen(open=>!open)} aria-label="Open AI chatbot" style={{position:"fixed",right:24,bottom:20,zIndex:2001,border:0,borderRadius:30,padding:"14px 20px",background:"#7058e8",color:"white",fontWeight:600,fontSize:14,cursor:"pointer",boxShadow:"0 5px 20px #0003"}}>{chatOpen?"Close chat ×":"✦ Chat with AI"}</button>
   {toast&&<div className="toast"><span>✦</span>{toast}</div>}
  </div>
 }
 
-function Dashboard({plan,completion,exercises,completed,toggle,setShowAssessment,nav,first}){return <div className="page"><section className="welcome-row"><div><div className="kicker">PERSONAL FITNESS OPERATING SYSTEM</div><h1>Good to see you, <em>{first}.</em></h1><p>Your dashboard for training, nutrition, progress and your next evolution.</p></div><button className="ghost-button" onClick={()=>setShowAssessment(true)}>✦ Reassess</button></section><section className="hero-panel"><div className="hero-grid-glow"/><div className="hero-copy"><div className="hero-chip"><span>✦</span> PERSONALIZED FITNESS</div><h2>Forge a body<br/><span>built for your goals.</span></h2><p>Turn your goal and fitness level into a personalized, measurable training journey.</p><div className="hero-actions"><button className="primary-button" onClick={()=>setShowAssessment(true)}>Start Assessment <span>→</span></button><button className="hero-secondary" onClick={()=>nav("progress")}>Explore progress</button></div><div className="hero-proof"><div className="proof-stack"><span>A</span><span>F</span><span>+</span></div><div><b>Built around you</b><small>Goal · Level · Progress · Consistency</small></div></div></div><div className="hero-visual"><div className="visual-grid"/><div className="orbit orbit-a"/><div className="orbit orbit-b"/><div className="glow-ball ball-a"/><div className="glow-ball ball-b"/><div className="avatar-platform"><div className="platform-ring"/><div className="avatar-figure"><div className="avatar-head"/><div className="avatar-neck"/><div className="avatar-torso"/><div className="avatar-arm left"/><div className="avatar-arm right"/><div className="avatar-leg left"/><div className="avatar-leg right"/></div></div><div className="floating-metric score-card"><span>FITNESS SCORE</span><div><strong>{plan.fitness_score}</strong><small>/100</small></div><i><b/></i></div><div className="floating-metric level-card"><span>CURRENT LEVEL</span><strong>{plan.level}</strong><small>Adaptive plan</small></div><div className="floating-tag">↗ {completion}% <span>workout</span></div></div></section>
+
+function AuthModal({close,onSuccess}){
+ const [mode,setMode]=useState("signup");
+ const [busy,setBusy]=useState(false);
+ const [message,setMessage]=useState("");
+ const [form,setForm]=useState({full_name:"",age:"",mobile_number:"",email:"",password:"",height_cm:"",weight_kg:"",body_fat_percentage:"",activity_level:"Moderately Active",health_conditions:""});
+ function update(key,value){setForm(old=>({...old,[key]:value}))}
+ async function submit(e){
+  e.preventDefault();setBusy(true);setMessage("");
+  try{
+   if(mode==="signup"){
+    const {data,error}=await supabase.auth.signUp({email:form.email,password:form.password,options:{data:{full_name:form.full_name,age:form.age,mobile_number:form.mobile_number,height_cm:form.height_cm,weight_kg:form.weight_kg,body_fat_percentage:form.body_fat_percentage,activity_level:form.activity_level,health_conditions:form.health_conditions}}});
+    if(error)throw error;
+    if(data.session&&data.user){
+     const h=Number(form.height_cm)||0,w=Number(form.weight_kg)||0;
+     const payload={user_id:data.user.id,full_name:form.full_name,age:form.age?Number(form.age):null,mobile_number:form.mobile_number||null,height_cm:h||null,weight_kg:w||null,bmi:h&&w?Number((w/((h/100)**2)).toFixed(1)):null,body_fat_percentage:form.body_fat_percentage?Number(form.body_fat_percentage):null,activity_level:form.activity_level,health_conditions:form.health_conditions||null};
+     const {error:saveError}=await supabase.from("profiles").upsert(payload);if(saveError)throw saveError;
+     await onSuccess(data.user);
+    }else{setMode("login");setMessage("Account created. Check your email to confirm your account, then log in here.");}
+   }else{
+    const {data,error}=await supabase.auth.signInWithPassword({email:form.email,password:form.password});
+    if(error)throw error;if(data.user)await onSuccess(data.user);
+   }
+  }catch(err){setMessage(err?.message||"Something went wrong. Please try again.");}
+  finally{setBusy(false)}
+ }
+ const inputStyle={width:"100%",padding:"11px 12px",borderRadius:9,border:"1px solid #555",background:"rgba(255,255,255,0.06)",color:"inherit",boxSizing:"border-box"};
+ const labelStyle={display:"block",fontSize:12,marginBottom:5,opacity:.85};
+ const field=(label,key,type="text",required=false)=><label style={{display:"block",marginBottom:12}}><span style={labelStyle}>{label}</span><input style={inputStyle} type={type} value={form[key]} onChange={e=>update(key,e.target.value)} required={required} /></label>;
+ return <div className="modal-backdrop" style={{zIndex:1000,overflowY:"auto",padding:18}}><div className="modal" style={{maxHeight:"90vh",overflowY:"auto",width:"min(560px, 100%)",boxSizing:"border-box"}}><button type="button" className="modal-close" onClick={close}>×</button><div className="kicker">FITNESS FORGE ACCOUNT</div><h2>{mode==="signup"?"Create your account":"Welcome back"}</h2><p>{mode==="signup"?"Save your fitness profile and access it when you return.":"Log in to load your saved fitness profile."}</p><div style={{display:"flex",gap:8,marginBottom:18}}><button type="button" className={mode==="signup"?"primary-button":"ghost-button"} onClick={()=>{setMode("signup");setMessage("")}}>Sign up</button><button type="button" className={mode==="login"?"primary-button":"ghost-button"} onClick={()=>{setMode("login");setMessage("")}}>Login</button></div><form onSubmit={submit}>
+ {mode==="signup"&&<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(190px,1fr))",gap:"0 12px"}}>{field("Full name","full_name","text",true)}{field("Age","age","number",true)}{field("Mobile number","mobile_number","tel")}{field("Height (cm)","height_cm","number",true)}{field("Weight (kg)","weight_kg","number",true)}{field("Body fat percentage (%)","body_fat_percentage","number")}
+ <label style={{display:"block",marginBottom:12}}><span style={labelStyle}>Activity level</span><select style={inputStyle} value={form.activity_level} onChange={e=>update("activity_level",e.target.value)}>{["Sedentary","Lightly Active","Moderately Active","Very Active"].map(x=><option key={x}>{x}</option>)}</select></label><label style={{display:"block",marginBottom:12}}><span style={labelStyle}>Health conditions (optional)</span><input style={inputStyle} value={form.health_conditions} onChange={e=>update("health_conditions",e.target.value)} placeholder="None, or details you choose to share" /></label></div>}
+ {field("Email","email","email",true)}{field("Password (minimum 6 characters)","password","password",true)}
+ {message&&<p role="status" style={{fontSize:13,lineHeight:1.5,margin:"8px 0 14px",overflowWrap:"anywhere"}}>{message}</p>}
+ <button className="primary-button modal-submit" type="submit" disabled={busy}>{busy?"Please wait…":mode==="signup"?"Create account →":"Login →"}</button>
+ </form><p style={{fontSize:11,opacity:.7,marginTop:14}}>Your profile is stored in your account. Only share health information you are comfortable providing.</p></div></div>
+}
+
+function Dashboard({plan,completion,exercises,completed,toggle,setShowAssessment,nav,first}){return <div className="page"><section className="welcome-row"><div><div className="kicker">YOUR FITNESS JOURNEY</div><h1>Good to see you, <em>{first}.</em></h1><p>Your dashboard for training, nutrition, progress and your next evolution.</p></div><button className="ghost-button" onClick={()=>setShowAssessment(true)}>✦ Reassess</button></section><section className="hero-panel"><div className="hero-grid-glow"/><div className="hero-copy"><div className="hero-chip"><span>✦</span> PERSONALIZED FITNESS</div><h2>Forge a body<br/><span>built for your goals.</span></h2><p>Turn your goal and fitness level into a personalized, measurable training journey.</p><div className="hero-actions"><button className="primary-button" onClick={()=>setShowAssessment(true)}>Start Assessment <span>→</span></button><button className="hero-secondary" onClick={()=>nav("progress")}>Explore progress</button></div><div className="hero-proof"><div className="proof-stack"><span>A</span><span>F</span><span>+</span></div><div><b>Built around you</b><small>Goal · Level · Progress · Consistency</small></div></div></div><div className="hero-visual"><div className="visual-grid"/><div className="orbit orbit-a"/><div className="orbit orbit-b"/><div className="glow-ball ball-a"/><div className="glow-ball ball-b"/><div className="avatar-platform"><div className="platform-ring"/><div className="avatar-figure"><div className="avatar-head"/><div className="avatar-neck"/><div className="avatar-torso"/><div className="avatar-arm left"/><div className="avatar-arm right"/><div className="avatar-leg left"/><div className="avatar-leg right"/></div></div><div className="floating-metric score-card"><span>FITNESS SCORE</span><div><strong>{plan.fitness_score}</strong><small>/100</small></div><i><b/></i></div><div className="floating-metric level-card"><span>CURRENT LEVEL</span><strong>{plan.level}</strong><small>Adaptive plan</small></div><div className="floating-tag">↗ {completion}% <span>workout</span></div></div></section>
  <section className="metric-row"><Metric icon="🔥" label="WORKOUT STREAK" value="3" suffix="days" note="Keep the momentum"/><Metric icon="⚡" label="EXERCISES" value={`${completed.length}/${exercises.length}`} suffix="" note="Completed today"/><Metric icon="◈" label="CONSISTENCY" value={Math.max(62,completion)} suffix="%" note="This week"/><Metric icon="↗" label="PROGRESS" value="+12" suffix="%" note="Since starting"/></section>
  <section className="content-grid"><div className="panel workout-panel"><PanelHeading eyebrow="TODAY'S PLAN" title={plan.workout_type} right={<span className="duration">◷ {plan.duration}</span>}/><div className="workout-meta"><Meta label="GOAL" value={plan.goal}/><Meta label="LEVEL" value={plan.level}/><Meta label="INTENSITY" value={plan.intensity}/></div><div className="exercise-title"><div><b>Exercise sequence</b><span>Click an exercise when complete</span></div><span>{exercises.length} movements</span></div><div className="exercise-list">{exercises.map((x,i)=><button className={`exercise-row functional ${completed.includes(x)?"done":""}`} key={x} onClick={()=>toggle(x)}><div className="exercise-index">{String(i+1).padStart(2,"0")}</div><div className="exercise-symbol">{completed.includes(x)?"✓":["◒","◇","△","○"][i%4]}</div><div className="exercise-info"><b>{x}</b><span>{i===0?"Activation & warm-up":"Strength & conditioning"}</span></div><span className="exercise-time">{i===0?"5 min":"3 × 10"}</span><span className="exercise-arrow">{completed.includes(x)?"DONE":"→"}</span></button>)}</div><button className="wide-outline" onClick={()=>nav("workouts")}>Open full workout <span>→</span></button></div><div className="panel progress-panel"><PanelHeading eyebrow="YOUR PROGRESS" title="Growth overview" right={<span className="select-button">TODAY</span>}/><div className="score-highlight"><div><span>WORKOUT COMPLETE</span><b>{completion}<small>%</small></b></div><div className="score-change">{completed.length}/{exercises.length} done</div></div><div className="simple-progress"><i style={{width:`${completion}%`}}/></div><div className="progress-footer"><div><span>Strength</span><b>72%</b></div><div><span>Stamina</span><b>58%</b></div><div><span>Mobility</span><b>66%</b></div></div></div></section>
  <section className="smart-section"><div className="section-heading"><div><div className="kicker">THE NEXT EVOLUTION</div><h2>Intelligent fitness</h2></div><span>AI · VISION · 3D</span></div><div className="feature-grid"><Feature title="AI Fitness Coach" text="Rule-based today, AI personalization next." onClick={()=>setShowAssessment(true)}/><Feature title="Smart Nutrition" text="Open your daily energy and macro guide." onClick={()=>nav("nutrition")}/><Feature title="Evolving Avatar" text="Track your performance and future avatar." onClick={()=>nav("progress")}/></div></section></div>}
